@@ -144,42 +144,71 @@ def get_duration(file_path):
 def process_video(video_path, music_path, output_path, overlays, duration):
     """Process video with FFmpeg"""
     try:
+        import tempfile
+        
+        def create_text_file(text):
+            """Create temporary file with text"""
+            if not text:
+                return None
+            fd, path = tempfile.mkstemp(suffix='.txt', dir=UPLOAD_FOLDER)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(text)
+            return path
+        
         # Extract texts
-        top = overlays.get('top', {}).get('text', '').replace("'", "\\'")
-        center = overlays.get('center', {}).get('text', '').replace("'", "\\'")
-        bottom = overlays.get('bottom', {}).get('text', '').replace("'", "\\'")
+        top_text = overlays.get('top', {}).get('text', '')
+        center_text = overlays.get('center', {}).get('text', '')
+        bottom_text = overlays.get('bottom', {}).get('text', '')
+        
+        # Create text files
+        top_file = create_text_file(top_text)
+        center_file = create_text_file(center_text)
+        bottom_file = create_text_file(bottom_text)
         
         # Build filter
-        filters = ["scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"]
+        video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
         
-        if top:
-            filters.append(f"drawtext=text='{top}':fontsize=26:fontcolor=white:x=(w-text_w)/2:y=80:box=1:boxcolor=black@0.5:boxborderw=10")
+        if top_file:
+            video_filter += f",drawtext=textfile='{top_file}':fontsize=26:fontcolor=white:x=(w-text_w)/2:y=80:box=1:boxcolor=black@0.5:boxborderw=10"
         
-        if center:
-            filters.append(f"drawtext=text='{center}':fontsize=44:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.65:boxborderw=15")
+        if center_file:
+            video_filter += f",drawtext=textfile='{center_file}':fontsize=44:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.65:boxborderw=15"
         
-        if bottom:
-            filters.append(f"drawtext=text='{bottom}':fontsize=22:fontcolor=white:x=(w-text_w)/2:y=h-100:box=1:boxcolor=black@0.5:boxborderw=10")
-        
-        filter_str = ",".join(filters)
+        if bottom_file:
+            video_filter += f",drawtext=textfile='{bottom_file}':fontsize=22:fontcolor=white:x=(w-text_w)/2:y=h-100:box=1:boxcolor=black@0.5:boxborderw=10"
         
         # FFmpeg command
         cmd = [
-            'ffmpeg', '-i', video_path, '-i', music_path, '-t', str(duration),
-            '-filter_complex', f'[0:v]{filter_str}[v]',
-            '-map', '[v]', '-map', '1:a',
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-            '-c:a', 'aac', '-b:a', '128k', '-shortest', '-y', output_path
+            'ffmpeg',
+            '-i', video_path,
+            '-i', music_path,
+            '-t', str(duration),
+            '-vf', video_filter,
+            '-map', '0:v',
+            '-map', '1:a',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-shortest',
+            '-y',
+            output_path
         ]
         
         logger.info("Starting FFmpeg processing...")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         
+        # Cleanup text files
+        for f in [top_file, center_file, bottom_file]:
+            if f and os.path.exists(f):
+                os.remove(f)
+        
         if result.returncode == 0:
             logger.info(f"Processing successful: {output_path}")
             return True
         else:
-            logger.error(f"FFmpeg error: {result.stderr}")
+            logger.error(f"FFmpeg stderr: {result.stderr}")
             return False
             
     except Exception as e:
