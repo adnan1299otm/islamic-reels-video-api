@@ -7,6 +7,7 @@ import requests
 from pathlib import Path
 import logging
 import threading
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -43,9 +44,10 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "Islamic Reels Video Processing API",
-        "version": "3.1.0",
-        "optimizations": "30s max duration, 5min timeout, optimized preset",
-        "platform": "Render.com"
+        "version": "3.2.0",
+        "optimizations": "30s max, 5min timeout, job persistence",
+        "platform": "Render.com",
+        "active_jobs": len(job_status)
     }), 200
 
 @app.route('/create-reel', methods=['POST'])
@@ -68,9 +70,7 @@ def create_reel():
         job_id = str(uuid.uuid4())[:8]
         logger.info(f"Job ID: {job_id}")
         
-        # Initialize job status
-        import time
-
+        # Initialize job status WITH TIMESTAMP
         job_status[job_id] = {
             "status": "processing",
             "progress": 0,
@@ -102,17 +102,35 @@ def create_reel():
 def process_reel_async(job_id, video_id, music_id, overlays, max_duration, base_url):
     """Background processing function"""
     try:
-        job_status[job_id] = {"status": "downloading", "progress": 20, "message": "Downloading files..."}
+        # UPDATE 1: Add timestamp
+        job_status[job_id] = {
+            "status": "downloading",
+            "progress": 20,
+            "message": "Downloading files...",
+            "timestamp": time.time()
+        }
         
         # Download files
         video_path = download_google_drive(video_id, f"{UPLOAD_FOLDER}/video_{job_id}.mp4")
         music_path = download_google_drive(music_id, f"{UPLOAD_FOLDER}/music_{job_id}.mp3")
         
         if not video_path or not music_path:
-            job_status[job_id] = {"status": "error", "progress": 0, "message": "Download failed"}
+            # UPDATE 2: Add timestamp
+            job_status[job_id] = {
+                "status": "error",
+                "progress": 0,
+                "message": "Download failed",
+                "timestamp": time.time()
+            }
             return
         
-        job_status[job_id] = {"status": "processing", "progress": 50, "message": "Processing video..."}
+        # UPDATE 3: Add timestamp
+        job_status[job_id] = {
+            "status": "processing",
+            "progress": 50,
+            "message": "Processing video...",
+            "timestamp": time.time()
+        }
         
         # Get durations
         video_dur = get_duration(video_path)
@@ -125,28 +143,35 @@ def process_reel_async(job_id, video_id, music_id, overlays, max_duration, base_
         if final_dur <= 0:
             final_dur = 20
         
-        logger.info(f"Durations - Video: {video_dur}, Music: {music_dur}, Final: {final_dur}")
+        logger.info(f"Durations - Video: {video_dur}s, Music: {music_dur}s, Final: {final_dur}s")
         
         # Process video
         output_path = f"{OUTPUT_FOLDER}/reel_{job_id}.mp4"
         success = process_video(video_path, music_path, output_path, overlays, final_dur)
         
         if not success:
-            job_status[job_id] = {"status": "error", "progress": 0, "message": "Processing failed"}
+            # UPDATE 4: Add timestamp
+            job_status[job_id] = {
+                "status": "error",
+                "progress": 0,
+                "message": "Processing failed",
+                "timestamp": time.time()
+            }
             cleanup([video_path, music_path])
             return
         
         # Generate public URL
         public_url = f"{base_url}outputs/reel_{job_id}.mp4"
         
-        # Update final status
+        # UPDATE 5: Add timestamp (FINAL STATUS)
         job_status[job_id] = {
             "status": "completed",
             "progress": 100,
             "videoUrl": public_url,
             "duration": final_dur,
             "audioReplaced": True,
-            "message": "Video processing completed successfully"
+            "message": "Video processing completed successfully",
+            "timestamp": time.time()
         }
         
         # Cleanup source files
@@ -156,19 +181,24 @@ def process_reel_async(job_id, video_id, music_id, overlays, max_duration, base_
         
     except Exception as e:
         logger.error(f"Async processing error: {str(e)}")
-        job_status[job_id] = {"status": "error", "progress": 0, "message": str(e)}
+        # UPDATE 6: Add timestamp (ERROR STATUS)
+        job_status[job_id] = {
+            "status": "error",
+            "progress": 0,
+            "message": str(e),
+            "timestamp": time.time()
+        }
 
 
 def cleanup_old_jobs():
-    """Clean up jobs older than 1 hour"""
-    import time
+    """Clean up jobs older than 2 hours"""
     current_time = time.time()
-    
     jobs_to_delete = []
+    
     for job_id, status in job_status.items():
-        # Keep jobs for 1 hour
         if 'timestamp' in status:
-            if current_time - status['timestamp'] > 3600:
+            # Keep jobs for 2 hours
+            if current_time - status['timestamp'] > 7200:
                 jobs_to_delete.append(job_id)
     
     for job_id in jobs_to_delete:
@@ -179,8 +209,14 @@ def cleanup_old_jobs():
 @app.route('/job-status/<job_id>')
 def get_job_status(job_id):
     """Get status of a processing job"""
+    # Clean up old jobs first
+    cleanup_old_jobs()
+    
     if job_id not in job_status:
-        return jsonify({"status": "error", "message": "Job not found"}), 404
+        return jsonify({
+            "status": "error",
+            "message": "Job not found or expired (jobs kept for 2 hours)"
+        }), 404
     
     return jsonify(job_status[job_id]), 200
 
@@ -191,7 +227,7 @@ def download_google_drive(file_id, output_path):
         url = f"https://drive.google.com/uc?export=download&id={file_id}"
         logger.info(f"Downloading: {url}")
         
-        response = requests.get(url, stream=True, timeout=60)
+        response = requests.get(url, stream=True, timeout=90)
         
         if response.status_code == 200:
             with open(output_path, 'wb') as f:
@@ -213,16 +249,16 @@ def get_duration(file_path):
     try:
         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
                '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 minutes
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         duration_str = result.stdout.strip()
-        return float(duration_str) if duration_str else 30.0
+        return float(duration_str) if duration_str else 20.0
     except Exception as e:
         logger.error(f"Duration detection error: {str(e)}")
-        return 30.0
+        return 20.0
 
 
 def process_video(video_path, music_path, output_path, overlays, duration):
-    """Process video with FFmpeg"""
+    """Process video with FFmpeg - OPTIMIZED"""
     try:
         import tempfile
         
@@ -245,19 +281,19 @@ def process_video(video_path, music_path, output_path, overlays, duration):
         center_file = create_text_file(center_text)
         bottom_file = create_text_file(bottom_text)
         
-        # Build filter
+        # Build filter - OPTIMIZED
         video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
         
         if top_file:
-            video_filter += f",drawtext=textfile='{top_file}':fontsize=26:fontcolor=white:x=(w-text_w)/2:y=80:box=1:boxcolor=black@0.5:boxborderw=10"
+            video_filter += f",drawtext=textfile='{top_file}':fontsize=24:fontcolor=white:x=(w-text_w)/2:y=60:box=1:boxcolor=black@0.5:boxborderw=8"
         
         if center_file:
-            video_filter += f",drawtext=textfile='{center_file}':fontsize=44:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.65:boxborderw=15"
+            video_filter += f",drawtext=textfile='{center_file}':fontsize=40:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.65:boxborderw=12"
         
         if bottom_file:
-            video_filter += f",drawtext=textfile='{bottom_file}':fontsize=22:fontcolor=white:x=(w-text_w)/2:y=h-100:box=1:boxcolor=black@0.5:boxborderw=10"
+            video_filter += f",drawtext=textfile='{bottom_file}':fontsize=20:fontcolor=white:x=(w-text_w)/2:y=h-80:box=1:boxcolor=black@0.5:boxborderw=8"
         
-        # FFmpeg command
+        # FFmpeg command - OPTIMIZED
         cmd = [
             'ffmpeg',
             '-i', video_path,
@@ -267,7 +303,7 @@ def process_video(video_path, music_path, output_path, overlays, duration):
             '-map', '0:v',
             '-map', '1:a',
             '-c:v', 'libx264',
-            '-preset', 'veryfast',  # Better quality, reasonable speed
+            '-preset', 'veryfast',
             '-crf', '28',
             '-c:a', 'aac',
             '-b:a', '128k',
@@ -276,7 +312,7 @@ def process_video(video_path, music_path, output_path, overlays, duration):
             output_path
         ]
         
-        logger.info("Starting FFmpeg processing...")
+        logger.info(f"Starting FFmpeg processing for {duration}s video...")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         # Cleanup text files
@@ -288,9 +324,12 @@ def process_video(video_path, music_path, output_path, overlays, duration):
             logger.info(f"Processing successful: {output_path}")
             return True
         else:
-            logger.error(f"FFmpeg stderr: {result.stderr}")
+            logger.error(f"FFmpeg error: {result.stderr}")
             return False
             
+    except subprocess.TimeoutExpired:
+        logger.error("FFmpeg timeout after 300 seconds")
+        return False
     except Exception as e:
         logger.error(f"Processing error: {str(e)}")
         return False
@@ -318,5 +357,5 @@ def serve_output(filename):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"Starting server on port {port}")
+    logger.info(f"Starting server on port {port} - Version 3.2.0")
     app.run(host='0.0.0.0', port=port, debug=False)
