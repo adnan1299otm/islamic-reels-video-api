@@ -69,10 +69,13 @@ def create_reel():
         logger.info(f"Job ID: {job_id}")
         
         # Initialize job status
+        import time
+
         job_status[job_id] = {
             "status": "processing",
             "progress": 0,
-            "message": "Job started"
+            "message": "Job started",
+            "timestamp": time.time()
         }
         
         # Start processing in background thread
@@ -154,6 +157,23 @@ def process_reel_async(job_id, video_id, music_id, overlays, max_duration, base_
     except Exception as e:
         logger.error(f"Async processing error: {str(e)}")
         job_status[job_id] = {"status": "error", "progress": 0, "message": str(e)}
+
+
+def cleanup_old_jobs():
+    """Clean up jobs older than 1 hour"""
+    import time
+    current_time = time.time()
+    
+    jobs_to_delete = []
+    for job_id, status in job_status.items():
+        # Keep jobs for 1 hour
+        if 'timestamp' in status:
+            if current_time - status['timestamp'] > 3600:
+                jobs_to_delete.append(job_id)
+    
+    for job_id in jobs_to_delete:
+        del job_status[job_id]
+        logger.info(f"Cleaned up old job: {job_id}")
 
 
 @app.route('/job-status/<job_id>')
