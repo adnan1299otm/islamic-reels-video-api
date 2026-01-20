@@ -6,6 +6,7 @@ import subprocess
 import requests
 from pathlib import Path
 import logging
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -20,6 +21,9 @@ OUTPUT_FOLDER = '/tmp/outputs'
 Path(UPLOAD_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
 
+# Global dictionary to store job status
+job_status = {}
+
 @app.route('/')
 def index():
     """Root endpoint"""
@@ -28,7 +32,8 @@ def index():
         "status": "running",
         "endpoints": {
             "health": "/health",
-            "create_reel": "/create-reel (POST)"
+            "create_reel": "/create-reel (POST)",
+            "job_status": "/job-status/<job_id> (GET)"
         }
     }), 200
 
@@ -38,13 +43,13 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "Islamic Reels Video Processing API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "platform": "Render.com"
     }), 200
 
 @app.route('/create-reel', methods=['POST'])
 def create_reel():
-    """Main endpoint to create Instagram Reel"""
+    """Main endpoint to create Instagram Reel - Async version"""
     try:
         data = request.json
         logger.info(f"Received request: {data}")
@@ -62,12 +67,48 @@ def create_reel():
         job_id = str(uuid.uuid4())[:8]
         logger.info(f"Job ID: {job_id}")
         
-        # Download from Google Drive
+        # Initialize job status
+        job_status[job_id] = {
+            "status": "processing",
+            "progress": 0,
+            "message": "Job started"
+        }
+        
+        # Start processing in background thread
+        thread = threading.Thread(
+            target=process_reel_async,
+            args=(job_id, video_id, music_id, overlays, max_duration, request.url_root)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        # Return immediately with job ID
+        return jsonify({
+            "status": "processing",
+            "jobId": job_id,
+            "statusUrl": f"{request.url_root}job-status/{job_id}",
+            "message": "Video processing started. Check status URL for progress."
+        }), 202
+        
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def process_reel_async(job_id, video_id, music_id, overlays, max_duration, base_url):
+    """Background processing function"""
+    try:
+        job_status[job_id] = {"status": "downloading", "progress": 20, "message": "Downloading files..."}
+        
+        # Download files
         video_path = download_google_drive(video_id, f"{UPLOAD_FOLDER}/video_{job_id}.mp4")
         music_path = download_google_drive(music_id, f"{UPLOAD_FOLDER}/music_{job_id}.mp3")
         
         if not video_path or not music_path:
-            return jsonify({"status": "error", "message": "Download failed"}), 400
+            job_status[job_id] = {"status": "error", "progress": 0, "message": "Download failed"}
+            return
+        
+        job_status[job_id] = {"status": "processing", "progress": 50, "message": "Processing video..."}
         
         # Get durations
         video_dur = get_duration(video_path)
@@ -84,25 +125,40 @@ def create_reel():
         success = process_video(video_path, music_path, output_path, overlays, final_dur)
         
         if not success:
-            return jsonify({"status": "error", "message": "Processing failed"}), 500
+            job_status[job_id] = {"status": "error", "progress": 0, "message": "Processing failed"}
+            cleanup([video_path, music_path])
+            return
         
         # Generate public URL
-        public_url = f"{request.url_root}outputs/reel_{job_id}.mp4"
+        public_url = f"{base_url}outputs/reel_{job_id}.mp4"
         
-        # Cleanup
-        cleanup([video_path, music_path])
-        
-        return jsonify({
-            "status": "success",
+        # Update final status
+        job_status[job_id] = {
+            "status": "completed",
+            "progress": 100,
             "videoUrl": public_url,
             "duration": final_dur,
             "audioReplaced": True,
-            "jobId": job_id
-        }), 200
+            "message": "Video processing completed successfully"
+        }
+        
+        # Cleanup source files
+        cleanup([video_path, music_path])
+        
+        logger.info(f"Job {job_id} completed successfully")
         
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Async processing error: {str(e)}")
+        job_status[job_id] = {"status": "error", "progress": 0, "message": str(e)}
+
+
+@app.route('/job-status/<job_id>')
+def get_job_status(job_id):
+    """Get status of a processing job"""
+    if job_id not in job_status:
+        return jsonify({"status": "error", "message": "Job not found"}), 404
+    
+    return jsonify(job_status[job_id]), 200
 
 
 def download_google_drive(file_id, output_path):
