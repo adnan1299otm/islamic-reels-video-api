@@ -43,7 +43,8 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "Islamic Reels Video Processing API",
-        "version": "3.0.0",
+        "version": "3.1.0",
+        "optimizations": "30s max duration, 5min timeout, optimized preset",
         "platform": "Render.com"
     }), 200
 
@@ -113,10 +114,13 @@ def process_reel_async(job_id, video_id, music_id, overlays, max_duration, base_
         # Get durations
         video_dur = get_duration(video_path)
         music_dur = get_duration(music_path)
-        final_dur = min(video_dur, music_dur, max_duration)
-        
+
+        # LIMIT TO 30 SECONDS for Render free tier optimization
+        actual_max = min(max_duration, 30)
+        final_dur = min(video_dur, music_dur, actual_max)
+
         if final_dur <= 0:
-            final_dur = 30
+            final_dur = 20
         
         logger.info(f"Durations - Video: {video_dur}, Music: {music_dur}, Final: {final_dur}")
         
@@ -189,7 +193,7 @@ def get_duration(file_path):
     try:
         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
                '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 minutes
         duration_str = result.stdout.strip()
         return float(duration_str) if duration_str else 30.0
     except Exception as e:
@@ -243,7 +247,7 @@ def process_video(video_path, music_path, output_path, overlays, duration):
             '-map', '0:v',
             '-map', '1:a',
             '-c:v', 'libx264',
-            '-preset', 'ultrafast',
+            '-preset', 'veryfast',  # Better quality, reasonable speed
             '-crf', '28',
             '-c:a', 'aac',
             '-b:a', '128k',
@@ -253,7 +257,7 @@ def process_video(video_path, music_path, output_path, overlays, duration):
         ]
         
         logger.info("Starting FFmpeg processing...")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         # Cleanup text files
         for f in [top_file, center_file, bottom_file]:
