@@ -5,9 +5,14 @@ import uuid
 import subprocess
 import requests
 from pathlib import Path
+import logging
 
 app = Flask(__name__)
 CORS(app)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Directories
 UPLOAD_FOLDER = '/tmp/uploads'
@@ -15,7 +20,19 @@ OUTPUT_FOLDER = '/tmp/outputs'
 Path(UPLOAD_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
 
-@app.route('/health', methods=['GET'])
+@app.route('/')
+def index():
+    """Root endpoint"""
+    return jsonify({
+        "service": "Islamic Reels Video Processing API",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "create_reel": "/create-reel (POST)"
+        }
+    }), 200
+
+@app.route('/health')
 def health_check():
     """Health check endpoint"""
     return jsonify({
@@ -30,6 +47,7 @@ def create_reel():
     """Main endpoint to create Instagram Reel"""
     try:
         data = request.json
+        logger.info(f"Received request: {data}")
         
         # Extract parameters
         video_id = data.get('videoId')
@@ -42,6 +60,7 @@ def create_reel():
         
         # Generate unique job ID
         job_id = str(uuid.uuid4())[:8]
+        logger.info(f"Job ID: {job_id}")
         
         # Download from Google Drive
         video_path = download_google_drive(video_id, f"{UPLOAD_FOLDER}/video_{job_id}.mp4")
@@ -57,6 +76,8 @@ def create_reel():
         
         if final_dur <= 0:
             final_dur = 30
+        
+        logger.info(f"Durations - Video: {video_dur}, Music: {music_dur}, Final: {final_dur}")
         
         # Process video
         output_path = f"{OUTPUT_FOLDER}/reel_{job_id}.mp4"
@@ -80,7 +101,7 @@ def create_reel():
         }), 200
         
     except Exception as e:
-        app.logger.error(f"Error: {str(e)}")
+        logger.error(f"Error: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -88,15 +109,22 @@ def download_google_drive(file_id, output_path):
     """Download file from Google Drive"""
     try:
         url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        logger.info(f"Downloading: {url}")
+        
         response = requests.get(url, stream=True, timeout=60)
         
         if response.status_code == 200:
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
+            logger.info(f"Downloaded successfully: {output_path}")
             return output_path
-        return None
-    except:
+        else:
+            logger.error(f"Download failed with status: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Download error: {str(e)}")
         return None
 
 
@@ -108,7 +136,8 @@ def get_duration(file_path):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         duration_str = result.stdout.strip()
         return float(duration_str) if duration_str else 30.0
-    except:
+    except Exception as e:
+        logger.error(f"Duration detection error: {str(e)}")
         return 30.0
 
 
@@ -143,9 +172,18 @@ def process_video(video_path, music_path, output_path, overlays, duration):
             '-c:a', 'aac', '-b:a', '128k', '-shortest', '-y', output_path
         ]
         
+        logger.info("Starting FFmpeg processing...")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        return result.returncode == 0
-    except:
+        
+        if result.returncode == 0:
+            logger.info(f"Processing successful: {output_path}")
+            return True
+        else:
+            logger.error(f"FFmpeg error: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Processing error: {str(e)}")
         return False
 
 
@@ -155,11 +193,12 @@ def cleanup(files):
         try:
             if os.path.exists(f):
                 os.remove(f)
-        except:
-            pass
+                logger.info(f"Cleaned up: {f}")
+        except Exception as e:
+            logger.error(f"Cleanup error: {str(e)}")
 
 
-@app.route('/outputs/<filename>', methods=['GET'])
+@app.route('/outputs/<filename>')
 def serve_output(filename):
     """Serve processed video"""
     file_path = f"{OUTPUT_FOLDER}/{filename}"
@@ -170,4 +209,5 @@ def serve_output(filename):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
+    logger.info(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
